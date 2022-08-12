@@ -37,16 +37,21 @@ SOS_token = 0
 EOS_token = 1
 
 class Lang:
-    def __init__(self, name):
+    def __init__(self, name, letterByLetter = False):
         self.name = name
         self.word2index = {}
         self.word2count = {}
+        self.letterByLetter = letterByLetter
         self.index2word = {0: "SOS", 1: "EOS"}
         self.n_words = 2  # Count SOS and EOS
 
     def addSentence(self, sentence):
-        for word in sentence.split(' '):
-            self.addWord(word)
+        if (self.letterByLetter):
+            for letter in sentence:
+                self.addWord(letter)
+        else:
+            for word in sentence.split(' '):
+                self.addWord(word)
 
     def addWord(self, word):
         if word not in self.word2index:
@@ -72,10 +77,10 @@ def unicodeToAscii(s):
 def normalizeString(s):
     s = unicodeToAscii(s.lower().strip())
     s = re.sub(r"([.!?])", r" \1", s)
-    s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
+    # s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
     return s
 
-def readLangs(lang1, lang2, reverse=False):
+def readLangs(lang1, lang2, reverse=False, letterByLetter1=False, letterByLetter2=False):
     print("Reading lines...")
 
     # Read the file and split into lines
@@ -83,20 +88,20 @@ def readLangs(lang1, lang2, reverse=False):
         read().strip().split('\n')
 
     # Split every line into pairs and normalize
-    pairs = [[normalizeString(s) for s in l.split('\t')] for l in lines]
+    pairs = [[normalizeString(s) for s in l.split('\t')[:2]] for l in lines]
 
     # Reverse pairs, make Lang instances
     if reverse:
         pairs = [list(reversed(p)) for p in pairs]
-        input_lang = Lang(lang2)
-        output_lang = Lang(lang1)
+        input_lang = Lang(lang2, letterByLetter2)
+        output_lang = Lang(lang1, letterByLetter1)
     else:
-        input_lang = Lang(lang1)
-        output_lang = Lang(lang2)
+        input_lang = Lang(lang1, letterByLetter1)
+        output_lang = Lang(lang2, letterByLetter2)
 
     return input_lang, output_lang, pairs
 
-MAX_LENGTH = 10
+MAX_LENGTH = 50
 
 eng_prefixes = (
     "i am ", "i m ",
@@ -117,11 +122,11 @@ def filterPair(p):
 def filterPairs(pairs):
     return [pair for pair in pairs if filterPair(pair)]
 
-def prepareData(lang1, lang2, reverse=False):
-    input_lang, output_lang, pairs = readLangs(lang1, lang2, reverse)
+def prepareData(lang1, lang2, reverse=False, letterByLetter1=False, letterByLetter2=False):
+    input_lang, output_lang, pairs = readLangs(lang1, lang2, reverse, letterByLetter1, letterByLetter2)
     print("Read %s sentence pairs" % len(pairs))
-    pairs = filterPairs(pairs)
-    print("Trimmed to %s sentence pairs" % len(pairs))
+    # pairs = filterPairs(pairs)
+    # print("Trimmed to %s sentence pairs" % len(pairs))
     print("Counting words...")
     for pair in pairs:
         input_lang.addSentence(pair[0])
@@ -132,13 +137,13 @@ def prepareData(lang1, lang2, reverse=False):
     return input_lang, output_lang, pairs
 
 
-franch_lang, english_lang, fra_eng_pairs = prepareData('eng', 'fra', True)
-eng_fra_pairs = []
-for [fra, eng] in fra_eng_pairs:
-    eng_fra_pairs.append([eng, fra])
+cmn_lang, eng_lang, cmn_eng_pairs = prepareData('eng', 'cmn', reverse=True, letterByLetter2=True)
+eng_cmn_pairs = []
+for [cmn, eng] in cmn_eng_pairs:
+    eng_cmn_pairs.append([eng, cmn])
 
-print(random.choice(fra_eng_pairs))
-print(random.choice(eng_fra_pairs))
+print(random.choice(cmn_eng_pairs))
+print(random.choice(eng_cmn_pairs))
 
 
 # The Seq2Seq Model
@@ -202,9 +207,18 @@ class AttnDecoderRNN(nn.Module):
 # Training
 
 ## Preparing Training Data
-def indexesFromSentence(lang, sentence):
-    return [lang.word2index[word] for word in sentence.split(' ')]
+def getWordIndex(word, lang):
+    if word in lang.word2index:
+        return lang.word2index[word]
+    return -1
 
+def indexesFromSentence(lang, sentence):
+    words = list(sentence) if lang.letterByLetter else sentence.split(' ')
+    indexes = []
+    for word in words:
+        index = getWordIndex(word, lang)
+        if (index >= 0): indexes.append(index)
+    return indexes
 
 def tensorFromSentence(lang, sentence):
     indexes = indexesFromSentence(lang, sentence)
@@ -279,7 +293,11 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
 ## Create set of training pairs
 # Then we call train many times and occasionally print the progress
 #    (% of examples, time so far, estimated time) and average loss.
-def trainIters(encoder, decoder, input_lang, output_lang, pairs, n_iters, print_every=1000, learning_rate=0.01):
+def trainIters(
+    encoder, decoder,
+    input_lang, output_lang, pairs,
+    n_iters=40000, print_every=1000, learning_rate=0.01):
+
     start = time.time()
     print_loss_total = 0  # Reset every print_every
 
@@ -356,17 +374,20 @@ def evaluateRandomly(encoder, decoder, input_lang, output_lang, pairs, n=10):
 hidden_size = 256
 
 ## English to Franch
-encoder1 = EncoderRNN(english_lang.n_words, hidden_size).to(device)
-attn_decoder1 = AttnDecoderRNN(hidden_size, franch_lang.n_words, dropout_p=0.1).to(device)
-trainIters(encoder1, attn_decoder1, english_lang, franch_lang, eng_fra_pairs, 100, print_every=10)
+encoder1 = EncoderRNN(eng_lang.n_words, hidden_size).to(device)
+attn_decoder1 = AttnDecoderRNN(hidden_size, cmn_lang.n_words, dropout_p=0.1).to(device)
+trainIters(
+    encoder1, attn_decoder1,
+    eng_lang, cmn_lang, eng_cmn_pairs,
+    n_iters=100, print_every=10)
 
 # Franch to English
-encoder2 = EncoderRNN(franch_lang.n_words, hidden_size).to(device)
-attn_decoder2 = AttnDecoderRNN(hidden_size, english_lang.n_words, dropout_p=0.1).to(device)
-trainIters(encoder2, attn_decoder2, franch_lang, english_lang, fra_eng_pairs, 100, print_every=10)
+# encoder2 = EncoderRNN(cmn_lang.n_words, hidden_size).to(device)
+# attn_decoder2 = AttnDecoderRNN(hidden_size, eng_lang.n_words, dropout_p=0.1).to(device)
+# trainIters(encoder2, attn_decoder2, cmn_lang, eng_lang, cmn_eng_pairs, 40000, print_every=10)
 
-evaluateRandomly(encoder1, attn_decoder1, english_lang, franch_lang, eng_fra_pairs)
-evaluateRandomly(encoder2, attn_decoder2, franch_lang, english_lang, fra_eng_pairs)
+evaluateRandomly(encoder1, attn_decoder1, eng_lang, cmn_lang, eng_cmn_pairs)
+# evaluateRandomly(encoder2, attn_decoder2, cmn_lang, eng_lang, cmn_eng_pairs)
 
 
 from torch.utils.mobile_optimizer import optimize_for_mobile
@@ -376,13 +397,14 @@ from torch.utils.mobile_optimizer import optimize_for_mobile
 #     optimized_model = optimize_for_mobile(scripted_model)
 #     optimized_model._save_for_lite_interpreter(path)
 
-# Save to ptl
+
+# Save model data
 
 def saveEncoderToPTL(encoder, path):
     scripted_encoder = torch.jit.trace(
         encoder,
         (
-            tensorFromSentence(english_lang, 'potatoes')[1].to(device),
+            tensorFromSentence(eng_lang, 'potatoes')[1].to(device),
             encoder.initHidden().to(device)
         )
     )
@@ -400,22 +422,25 @@ def saveDecoderToPTL(decoder, path):
     )
     optimized_decoder = optimize_for_mobile(scripted_decoder)
     optimized_decoder._save_for_lite_interpreter(path)
+    print('successfully saved to ' + path)
 
-saveEncoderToPTL(encoder1, 'eng_to_fra_encoder_100.ptl')
-saveDecoderToPTL(attn_decoder1, 'eng_to_fra_attndecoder_100.ptl')
+import json
+def saveDict(data, path):
+    with open(path, 'w') as f:
+        json.dump(data, f)
+
+# saveEncoderToPTL(encoder1, 'eng_to_cmn_encoder_100.ptl')
+# saveDecoderToPTL(attn_decoder1, 'eng_to_cmn_attndecoder_100.ptl')
 
 
 ## The following code requires first specifying encoder / decoder
 # e.g.  encoder = encoder2
 #       deconder = attn_decoder2
 
-def translateEnglishtoFrench(sent):
-    words = evaluate(encoder, decoder, sent, english_lang, franch_lang)[0]
-    words.pop()
-    return ' '.join(words)
+translate('this is bad', encoder1, 
 
 def translateFrenchtoEnglish(sent):
-    words = evaluate(encoder, decoder, sent, franch_lang, english_lang)[0]
+    words = evaluate(encoder, decoder, sent, cmn_lang, eng_lang)[0]
     words.pop()
     return ' '.join(words)
 
